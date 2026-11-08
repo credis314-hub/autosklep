@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "autosklep",
+  "version": "1.0.0",
+  "name": "AutoSklep",
+  "description": "Automatyczna, cykliczna sprzedaż wybranych przedmiotów w GUI sklepu.",
+  "authors": [
+    "AutoSklep"
+  ],
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "pl.autosklep.AutoSklepClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "1.21.4",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "license": "MIT"
+}
