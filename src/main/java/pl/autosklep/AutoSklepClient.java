@@ -75,7 +75,11 @@ public class AutoSklepClient implements ClientModInitializer {
 
     /** Ustawienia zapisywane w config/autosklep.properties */
     static final class Config {
-        static String mineCommand = "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:redstone_ore";
+        static final String OLD_DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:redstone_ore";
+        static final String DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:deepslate_diamond_ore"
+                + " minecraft:iron_ore minecraft:deepslate_iron_ore"
+                + " minecraft:redstone_ore minecraft:deepslate_redstone_ore";
+        static String mineCommand = DEFAULT_MINE;
         static int mineSeconds = 60;
         static boolean sellIron = true;
         static boolean sellDiamond = true;
@@ -93,6 +97,7 @@ public class AutoSklepClient implements ClientModInitializer {
                 Properties p = new Properties();
                 p.load(new InputStreamReader(in, StandardCharsets.UTF_8));
                 mineCommand = p.getProperty("mineCommand", mineCommand);
+                if (mineCommand.equals(OLD_DEFAULT_MINE)) mineCommand = DEFAULT_MINE;
                 try {
                     mineSeconds = Math.max(10, Integer.parseInt(p.getProperty("mineSeconds", String.valueOf(mineSeconds))));
                 } catch (NumberFormatException ignored) { }
@@ -335,6 +340,7 @@ public class AutoSklepClient implements ClientModInitializer {
                 tell(client, "AutoSklep: sprzedaż zakończona.");
                 if (Config.dropJunk) {
                     dropIndex = INV_FIRST;
+                    client.player.setPitch(-25f); // patrz lekko w gore, zeby rzeczy poleciały daleko
                     stage = Stage.DROP_JUNK;
                     waitTicks = 10;
                 } else {
@@ -369,7 +375,7 @@ public class AutoSklepClient implements ClientModInitializer {
         // THROW z przyciskiem 1 = wyrzucenie calego stosu (jak Ctrl+Q)
         client.interactionManager.clickSlot(h.syncId, dropIndex, 1, SlotActionType.THROW, client.player);
         dropIndex++;
-        waitTicks = 2;
+        waitTicks = 0; // jeden stos na tick, zeby skonczyc przed koncem 2 s blokady podnoszenia
     }
 
     private void startMining(MinecraftClient client) {
