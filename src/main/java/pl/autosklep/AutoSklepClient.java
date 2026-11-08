@@ -13,30 +13,30 @@ import org.lwjgl.glfw.GLFW;
 
 /**
  * AutoSklep for Fabric 1.21.4.
- *
- * Slot coordinates supplied by the user are 1-based (row, column):
- * Compass: row 3 col 4 -> GUI slot 22
- * Red wool: row 3 col 6 -> GUI slot 24
- * Raw iron: row 2 col 6 -> GUI slot 14
- * Diamond: row 2 col 7 -> GUI slot 15
- * Redstone: row 2 col 8 -> GUI slot 16
- *
- * The menu is assumed to be a 9x6 chest-like container.
+ * K: start -> #mine (3 min) -> #stop -> /sklep sprzedaz -> #mine -> ...
+ * Sloty liczone od zera: slot = (rzad - 1) * 9 + (kolumna - 1)
+ * Kompas 21, czerwona welna 23, zelazo 14, diament 15, redstone 16.
  */
 public class AutoSklepClient implements ClientModInitializer {
-    private static final int INTERVAL_TICKS = 20 * 60 * 10;
+    private static final int MINE_TICKS = 20 * 60 * 3;
+    private static final String MINE_COMMAND =
+            "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:redstone_ore";
+    private static final String STOP_COMMAND = "#stop";
+
+    private static final int COMPASS_SLOT = 21;
+    private static final int WOOL_SLOT = 23;
     private static final int[] SELL_SLOTS = {14, 15, 16};
 
     private KeyBinding toggleKey;
     private boolean enabled = false;
     private int tickCounter = 0;
     private int waitTicks = 0;
-    private Stage stage = Stage.IDLE;
-    private int lastSyncId = -1;
     private int retries = 0;
+    private Stage stage = Stage.IDLE;
 
     private enum Stage {
-        IDLE, WAIT_FIRST_MENU, WAIT_SECOND_MENU, WAIT_SELL_MENU, SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, FINISH
+        IDLE, MINING, WAIT_FIRST_MENU, WAIT_SECOND_MENU, WAIT_SELL_MENU,
+        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, FINISH
     }
 
     @Override
@@ -53,17 +53,27 @@ public class AutoSklepClient implements ClientModInitializer {
 
     private void tick(MinecraftClient client) {
         while (toggleKey.wasPressed()) {
+            if (client.player == null) break;
             enabled = !enabled;
             tickCounter = 0;
-            stage = Stage.IDLE;
-            tell(client, enabled ? "AutoSklep: WŁĄCZONY (K)" : "AutoSklep: WYŁĄCZONY (K)");
+            waitTicks = 0;
+            if (enabled) {
+                tell(client, "AutoSklep: WŁĄCZONY (K)");
+                startMining(client);
+            } else {
+                stage = Stage.IDLE;
+                sendChat(client, STOP_COMMAND);
+                tell(client, "AutoSklep: WYŁĄCZONY (K)");
+            }
         }
 
         if (!enabled || client.player == null || client.world == null) return;
 
-        if (stage == Stage.IDLE) {
-            if (++tickCounter >= INTERVAL_TICKS) {
+        if (stage == Stage.MINING) {
+            if (++tickCounter >= MINE_TICKS) {
                 tickCounter = 0;
+                sendChat(client, STOP_COMMAND);
+                tell(client, "AutoSklep: koniec kopania, wpisuję /sklep");
                 client.player.networkHandler.sendChatCommand("sklep");
                 stage = Stage.WAIT_FIRST_MENU;
                 retries = 0;
@@ -78,24 +88,20 @@ public class AutoSklepClient implements ClientModInitializer {
         }
 
         if (client.currentScreen == null || client.player.currentScreenHandler == client.player.playerScreenHandler) {
-            // Do not blindly click if the expected server GUI is not open.
             if (stage != Stage.WAIT_FIRST_MENU) abort(client, "Nie znaleziono oczekiwanego menu. Automat zatrzymany.");
             else if (++retries > 30) abort(client, "Menu /sklep nie otworzyło się. Automat zatrzymany.");
             else waitTicks = 10;
             return;
         }
 
-        ScreenHandler handler = client.player.currentScreenHandler;
-        if (handler.syncId != lastSyncId) lastSyncId = handler.syncId;
-
         switch (stage) {
             case WAIT_FIRST_MENU -> {
-                click(client, 22, 0, SlotActionType.PICKUP); // compass
+                click(client, COMPASS_SLOT, 0, SlotActionType.PICKUP);
                 stage = Stage.WAIT_SECOND_MENU;
                 waitTicks = 12;
             }
             case WAIT_SECOND_MENU -> {
-                click(client, 24, 0, SlotActionType.PICKUP); // red wool
+                click(client, WOOL_SLOT, 0, SlotActionType.PICKUP);
                 stage = Stage.WAIT_SELL_MENU;
                 waitTicks = 12;
             }
@@ -119,11 +125,22 @@ public class AutoSklepClient implements ClientModInitializer {
                 waitTicks = 10;
             }
             case FINISH -> {
-                stage = Stage.IDLE;
-                tell(client, "AutoSklep: zakończono próbę sprzedaży. Następna za 10 minut.");
+                client.player.closeHandledScreen();
+                tell(client, "AutoSklep: sprzedaż zakończona, wracam do kopania.");
+                startMining(client);
             }
             default -> { }
         }
+    }
+
+    private void startMining(MinecraftClient client) {
+        sendChat(client, MINE_COMMAND);
+        stage = Stage.MINING;
+        tickCounter = 0;
+    }
+
+    private void sendChat(MinecraftClient client, String message) {
+        if (client.player != null) client.player.networkHandler.sendChatMessage(message);
     }
 
     private void click(MinecraftClient client, int slot, int button, SlotActionType action) {
@@ -137,7 +154,6 @@ public class AutoSklepClient implements ClientModInitializer {
     }
 
     private void shiftRightClick(MinecraftClient client, int slot) {
-        // QUICK_MOVE is the inventory protocol's shift-click action. Button 1 requests right-button variant.
         click(client, slot, 1, SlotActionType.QUICK_MOVE);
     }
 
