@@ -3,167 +3,148 @@ package pl.autosklep;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.item.ItemStack;
+import net.minecraft.registry.Registries;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import org.lwjgl.glfw.GLFW;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
+import java.util.Set;
+
 /**
  * AutoSklep for Fabric 1.21.4.
- * K: start -> #mine (3 min) -> #stop -> /sklep sprzedaz -> #mine -> ...
+ * K otwiera okno ustawien.
+ * Cykl: #mine (X sekund) -> #stop -> 5 s przerwy -> /sklep sprzedaz -> wyrzucenie smieci -> #mine -> ...
  * Sloty liczone od zera: slot = (rzad - 1) * 9 + (kolumna - 1)
  * Kompas 21, czerwona welna 23, zelazo 14, diament 15, redstone 16.
  */
 public class AutoSklepClient implements ClientModInitializer {
-    private static final int MINE_TICKS = 20 * 60 * 3;
-    private static final String MINE_COMMAND =
-            "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:redstone_ore";
     private static final String STOP_COMMAND = "#stop";
+    private static final int COOLDOWN_TICKS = 20 * 5;
 
     private static final int COMPASS_SLOT = 21;
     private static final int WOOL_SLOT = 23;
-    private static final int[] SELL_SLOTS = {14, 15, 16};
+    private static final int IRON_SLOT = 14;
+    private static final int DIAMOND_SLOT = 15;
+    private static final int REDSTONE_SLOT = 16;
 
-    private KeyBinding toggleKey;
+    // Sloty ekwipunku gracza w PlayerScreenHandler: 9-35 plecak, 36-44 pasek
+    private static final int INV_FIRST = 9;
+    private static final int INV_LAST = 44;
+
+    /** Przedmioty, ktorych NIE wyrzucamy (poza kilofami). */
+    private static final Set<String> KEEP = Set.of(
+            "diamond", "diamond_ore", "deepslate_diamond_ore",
+            "raw_iron", "iron_ingot", "iron_ore", "deepslate_iron_ore",
+            "redstone", "redstone_ore", "deepslate_redstone_ore",
+            "beef", "cooked_beef", "porkchop", "cooked_porkchop",
+            "mutton", "cooked_mutton", "chicken", "cooked_chicken",
+            "rabbit", "cooked_rabbit"
+    );
+
+    private KeyBinding openKey;
     private boolean enabled = false;
     private int tickCounter = 0;
     private int waitTicks = 0;
     private int retries = 0;
+    private int dropIndex = INV_FIRST;
     private Stage stage = Stage.IDLE;
 
     private enum Stage {
-        IDLE, MINING, WAIT_FIRST_MENU, WAIT_SECOND_MENU, WAIT_SELL_MENU,
-        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, FINISH
+        IDLE, MINING, PRE_SHOP, WAIT_FIRST_MENU, WAIT_SECOND_MENU, WAIT_SELL_MENU,
+        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, FINISH, DROP_JUNK
     }
 
-    @Override
-    public void onInitializeClient() {
-        toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.autosklep.toggle",
-                InputUtil.Type.KEYSYM,
-                GLFW.GLFW_KEY_K,
-                "key.categories.misc"
-        ));
+    /** Ustawienia zapisywane w config/autosklep.properties */
+    static final class Config {
+        static String mineCommand = "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:redstone_ore";
+        static int mineSeconds = 60;
+        static boolean sellIron = true;
+        static boolean sellDiamond = true;
+        static boolean sellRedstone = true;
+        static boolean dropJunk = true;
 
-        ClientTickEvents.END_CLIENT_TICK.register(client -> tick(client));
-    }
-
-    private void tick(MinecraftClient client) {
-        while (toggleKey.wasPressed()) {
-            if (client.player == null) break;
-            enabled = !enabled;
-            tickCounter = 0;
-            waitTicks = 0;
-            if (enabled) {
-                tell(client, "AutoSklep: WŁĄCZONY (K)");
-                startMining(client);
-            } else {
-                stage = Stage.IDLE;
-                sendChat(client, STOP_COMMAND);
-                tell(client, "AutoSklep: WYŁĄCZONY (K)");
-            }
+        private static Path file() {
+            return FabricLoader.getInstance().getConfigDir().resolve("autosklep.properties");
         }
 
-        if (!enabled || client.player == null || client.world == null) return;
-
-        if (stage == Stage.MINING) {
-            if (++tickCounter >= MINE_TICKS) {
-                tickCounter = 0;
-                sendChat(client, STOP_COMMAND);
-                tell(client, "AutoSklep: koniec kopania, wpisuję /sklep");
-                client.player.networkHandler.sendChatCommand("sklep");
-                stage = Stage.WAIT_FIRST_MENU;
-                retries = 0;
-                waitTicks = 40;
-            }
-            return;
+        static void load() {
+            Path f = file();
+            if (!Files.exists(f)) return;
+            try (InputStream in = Files.newInputStream(f)) {
+                Properties p = new Properties();
+                p.load(new InputStreamReader(in, StandardCharsets.UTF_8));
+                mineCommand = p.getProperty("mineCommand", mineCommand);
+                try {
+                    mineSeconds = Math.max(10, Integer.parseInt(p.getProperty("mineSeconds", String.valueOf(mineSeconds))));
+                } catch (NumberFormatException ignored) { }
+                sellIron = Boolean.parseBoolean(p.getProperty("sellIron", "true"));
+                sellDiamond = Boolean.parseBoolean(p.getProperty("sellDiamond", "true"));
+                sellRedstone = Boolean.parseBoolean(p.getProperty("sellRedstone", "true"));
+                dropJunk = Boolean.parseBoolean(p.getProperty("dropJunk", "true"));
+            } catch (IOException ignored) { }
         }
 
-        if (waitTicks > 0) {
-            waitTicks--;
-            return;
-        }
-
-        if (client.currentScreen == null || client.player.currentScreenHandler == client.player.playerScreenHandler) {
-            if (stage != Stage.WAIT_FIRST_MENU) abort(client, "Nie znaleziono oczekiwanego menu. Automat zatrzymany.");
-            else if (++retries > 30) abort(client, "Menu /sklep nie otworzyło się. Automat zatrzymany.");
-            else waitTicks = 10;
-            return;
-        }
-
-        switch (stage) {
-            case WAIT_FIRST_MENU -> {
-                click(client, COMPASS_SLOT, 0, SlotActionType.PICKUP);
-                stage = Stage.WAIT_SECOND_MENU;
-                waitTicks = 12;
-            }
-            case WAIT_SECOND_MENU -> {
-                click(client, WOOL_SLOT, 0, SlotActionType.PICKUP);
-                stage = Stage.WAIT_SELL_MENU;
-                waitTicks = 12;
-            }
-            case WAIT_SELL_MENU -> {
-                stage = Stage.SELL_IRON;
-                waitTicks = 4;
-            }
-            case SELL_IRON -> {
-                shiftRightClick(client, SELL_SLOTS[0]);
-                stage = Stage.SELL_DIAMOND;
-                waitTicks = 4;
-            }
-            case SELL_DIAMOND -> {
-                shiftRightClick(client, SELL_SLOTS[1]);
-                stage = Stage.SELL_REDSTONE;
-                waitTicks = 4;
-            }
-            case SELL_REDSTONE -> {
-                shiftRightClick(client, SELL_SLOTS[2]);
-                stage = Stage.FINISH;
-                waitTicks = 10;
-            }
-            case FINISH -> {
-                client.player.closeHandledScreen();
-                tell(client, "AutoSklep: sprzedaż zakończona, wracam do kopania.");
-                startMining(client);
-            }
-            default -> { }
+        static void save() {
+            Properties p = new Properties();
+            p.setProperty("mineCommand", mineCommand);
+            p.setProperty("mineSeconds", String.valueOf(mineSeconds));
+            p.setProperty("sellIron", String.valueOf(sellIron));
+            p.setProperty("sellDiamond", String.valueOf(sellDiamond));
+            p.setProperty("sellRedstone", String.valueOf(sellRedstone));
+            p.setProperty("dropJunk", String.valueOf(dropJunk));
+            try (OutputStream out = Files.newOutputStream(file())) {
+                p.store(new OutputStreamWriter(out, StandardCharsets.UTF_8), "AutoSklep");
+            } catch (IOException ignored) { }
         }
     }
 
-    private void startMining(MinecraftClient client) {
-        sendChat(client, MINE_COMMAND);
-        stage = Stage.MINING;
-        tickCounter = 0;
-    }
+    /** Okno ustawien otwierane klawiszem K */
+    static final class ConfigScreen extends Screen {
+        private final AutoSklepClient mod;
+        private TextFieldWidget commandField;
+        private TextFieldWidget secondsField;
+        private ButtonWidget startButton;
 
-    private void sendChat(MinecraftClient client, String message) {
-        if (client.player != null) client.player.networkHandler.sendChatMessage(message);
-    }
-
-    private void click(MinecraftClient client, int slot, int button, SlotActionType action) {
-        if (client.player == null || client.interactionManager == null) return;
-        ScreenHandler h = client.player.currentScreenHandler;
-        if (slot < 0 || slot >= h.slots.size()) {
-            abort(client, "Slot poza zakresem menu: " + slot);
-            return;
+        ConfigScreen(AutoSklepClient mod) {
+            super(Text.literal("AutoSklep"));
+            this.mod = mod;
         }
-        client.interactionManager.clickSlot(h.syncId, slot, button, action, client.player);
-    }
 
-    private void shiftRightClick(MinecraftClient client, int slot) {
-        click(client, slot, 1, SlotActionType.QUICK_MOVE);
-    }
+        private static Text toggleLabel(String name, boolean on) {
+            return Text.literal(name + ": " + (on ? "TAK" : "NIE"));
+        }
 
-    private void abort(MinecraftClient client, String message) {
-        stage = Stage.IDLE;
-        enabled = false;
-        tell(client, "AutoSklep: " + message + " Wciśnij K, aby ponownie włączyć.");
-    }
+        private Text startLabel() {
+            return Text.literal(mod.enabled ? "STOP" : "START");
+        }
 
-    private void tell(MinecraftClient client, String message) {
-        if (client.player != null) client.player.sendMessage(Text.literal(message), false);
-    }
-}
+        @Override
+        protected void init() {
+            int cx = width / 2;
+            int top = height / 2 - 110;
+
+            commandField = new TextFieldWidget(textRenderer, cx - 150, top + 34, 300, 20, Text.literal("Komenda"));
+            commandField.setMaxLength(256);
+            commandField.setText(Config.mineCommand);
+            addDrawableChild(commandField);
+
+            secondsField = new TextFieldWidget(textRenderer, cx - 150, top + 78, 80, 20,
