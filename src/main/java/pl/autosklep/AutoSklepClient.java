@@ -340,7 +340,9 @@ public class AutoSklepClient implements ClientModInitializer {
                 tell(client, "AutoSklep: sprzedaż zakończona.");
                 if (Config.dropJunk) {
                     dropIndex = INV_FIRST;
-                    client.player.setPitch(-25f); // patrz lekko w gore, zeby rzeczy poleciały daleko
+                    // obroc sie tylem i patrz lekko w gore, zeby rzeczy poleciały daleko za plecy
+                    client.player.setYaw(client.player.getYaw() + 180f);
+                    client.player.setPitch(-25f);
                     stage = Stage.DROP_JUNK;
                     waitTicks = 10;
                 } else {
