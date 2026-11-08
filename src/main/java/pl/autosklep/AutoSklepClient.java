@@ -147,4 +147,264 @@ public class AutoSklepClient implements ClientModInitializer {
             commandField.setText(Config.mineCommand);
             addDrawableChild(commandField);
 
-            secondsField = new TextFieldWidget(textRenderer, cx - 150, top + 78, 80, 20,
+            secondsField = new TextFieldWidget(textRenderer, cx - 150, top + 78, 80, 20, Text.literal("Sekundy"));
+            secondsField.setMaxLength(5);
+            secondsField.setText(String.valueOf(Config.mineSeconds));
+            addDrawableChild(secondsField);
+
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Żelazo", Config.sellIron), b -> {
+                Config.sellIron = !Config.sellIron;
+                b.setMessage(toggleLabel("Żelazo", Config.sellIron));
+            }).dimensions(cx - 150, top + 122, 96, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Diament", Config.sellDiamond), b -> {
+                Config.sellDiamond = !Config.sellDiamond;
+                b.setMessage(toggleLabel("Diament", Config.sellDiamond));
+            }).dimensions(cx - 48, top + 122, 96, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Redstone", Config.sellRedstone), b -> {
+                Config.sellRedstone = !Config.sellRedstone;
+                b.setMessage(toggleLabel("Redstone", Config.sellRedstone));
+            }).dimensions(cx + 54, top + 122, 96, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Wyrzucaj śmieci", Config.dropJunk), b -> {
+                Config.dropJunk = !Config.dropJunk;
+                b.setMessage(toggleLabel("Wyrzucaj śmieci", Config.dropJunk));
+            }).dimensions(cx - 150, top + 148, 300, 20).build());
+
+            startButton = addDrawableChild(ButtonWidget.builder(startLabel(), b -> {
+                applySettings();
+                MinecraftClient c = MinecraftClient.getInstance();
+                if (mod.enabled) {
+                    mod.stop(c);
+                    b.setMessage(startLabel());
+                } else {
+                    mod.start(c);
+                    close();
+                }
+            }).dimensions(cx - 150, top + 176, 148, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(Text.literal("Zamknij"), b -> close())
+                    .dimensions(cx + 2, top + 176, 148, 20).build());
+        }
+
+        private void applySettings() {
+            String cmd = commandField.getText().trim();
+            if (!cmd.isEmpty()) Config.mineCommand = cmd;
+            try {
+                Config.mineSeconds = Math.max(10, Integer.parseInt(secondsField.getText().trim()));
+            } catch (NumberFormatException ignored) { }
+            Config.save();
+        }
+
+        @Override
+        public void removed() {
+            applySettings();
+        }
+
+        @Override
+        public boolean shouldPause() {
+            return false;
+        }
+
+        @Override
+        public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
+            super.render(ctx, mouseX, mouseY, delta);
+            int cx = width / 2;
+            int top = height / 2 - 110;
+            ctx.drawCenteredTextWithShadow(textRenderer, getTitle(), cx, top, 0xFFFFFFFF);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Komenda kopania (Baritone):"), cx - 150, top + 22, 0xFFAAAAAA);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Czas kopania (sekundy):"), cx - 150, top + 66, 0xFFAAAAAA);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Co sprzedawać:"), cx - 150, top + 110, 0xFFAAAAAA);
+            String status = mod.enabled ? "DZIAŁA (" + mod.stage + ")" : "WYŁĄCZONY";
+            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, top + 204, 0xFFFFFFFF);
+        }
+    }
+
+    @Override
+    public void onInitializeClient() {
+        Config.load();
+
+        openKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.autosklep.toggle",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_K,
+                "key.categories.misc"
+        ));
+
+        ClientTickEvents.END_CLIENT_TICK.register(client -> tick(client));
+    }
+
+    private void start(MinecraftClient client) {
+        if (client.player == null) return;
+        enabled = true;
+        waitTicks = 0;
+        tell(client, "AutoSklep: WŁĄCZONY");
+        startMining(client);
+    }
+
+    private void stop(MinecraftClient client) {
+        enabled = false;
+        stage = Stage.IDLE;
+        sendChat(client, STOP_COMMAND);
+        tell(client, "AutoSklep: WYŁĄCZONY");
+    }
+
+    private void tick(MinecraftClient client) {
+        while (openKey.wasPressed()) {
+            if (client.player != null) client.setScreen(new ConfigScreen(this));
+        }
+
+        if (!enabled || client.player == null || client.world == null) return;
+
+        if (stage == Stage.MINING) {
+            if (++tickCounter >= Config.mineSeconds * 20) {
+                tickCounter = 0;
+                sendChat(client, STOP_COMMAND);
+                tell(client, "AutoSklep: koniec kopania, za 5 s wpisuję /sklep");
+                stage = Stage.PRE_SHOP;
+                waitTicks = COOLDOWN_TICKS;
+            }
+            return;
+        }
+
+        if (waitTicks > 0) {
+            waitTicks--;
+            return;
+        }
+
+        if (stage == Stage.PRE_SHOP) {
+            tell(client, "AutoSklep: wpisuję /sklep");
+            client.player.networkHandler.sendChatCommand("sklep");
+            stage = Stage.WAIT_FIRST_MENU;
+            retries = 0;
+            waitTicks = 40;
+            return;
+        }
+
+        if (stage == Stage.DROP_JUNK) {
+            dropStep(client);
+            return;
+        }
+
+        if (client.currentScreen == null || client.player.currentScreenHandler == client.player.playerScreenHandler) {
+            if (stage != Stage.WAIT_FIRST_MENU) abort(client, "Nie znaleziono oczekiwanego menu. Automat zatrzymany.");
+            else if (++retries > 30) abort(client, "Menu /sklep nie otworzyło się. Automat zatrzymany.");
+            else waitTicks = 10;
+            return;
+        }
+
+        switch (stage) {
+            case WAIT_FIRST_MENU -> {
+                click(client, COMPASS_SLOT, 0, SlotActionType.PICKUP);
+                stage = Stage.WAIT_SECOND_MENU;
+                waitTicks = 12;
+            }
+            case WAIT_SECOND_MENU -> {
+                click(client, WOOL_SLOT, 0, SlotActionType.PICKUP);
+                stage = Stage.WAIT_SELL_MENU;
+                waitTicks = 12;
+            }
+            case WAIT_SELL_MENU -> {
+                stage = Stage.SELL_IRON;
+                waitTicks = 4;
+            }
+            case SELL_IRON -> {
+                if (Config.sellIron) {
+                    shiftRightClick(client, IRON_SLOT);
+                    waitTicks = 4;
+                }
+                stage = Stage.SELL_DIAMOND;
+            }
+            case SELL_DIAMOND -> {
+                if (Config.sellDiamond) {
+                    shiftRightClick(client, DIAMOND_SLOT);
+                    waitTicks = 4;
+                }
+                stage = Stage.SELL_REDSTONE;
+            }
+            case SELL_REDSTONE -> {
+                if (Config.sellRedstone) {
+                    shiftRightClick(client, REDSTONE_SLOT);
+                }
+                stage = Stage.FINISH;
+                waitTicks = 10;
+            }
+            case FINISH -> {
+                client.player.closeHandledScreen();
+                tell(client, "AutoSklep: sprzedaż zakończona.");
+                if (Config.dropJunk) {
+                    dropIndex = INV_FIRST;
+                    stage = Stage.DROP_JUNK;
+                    waitTicks = 10;
+                } else {
+                    startMining(client);
+                }
+            }
+            default -> { }
+        }
+    }
+
+    private static boolean shouldKeep(ItemStack stack) {
+        String path = Registries.ITEM.getId(stack.getItem()).getPath();
+        return path.endsWith("_pickaxe") || KEEP.contains(path);
+    }
+
+    private void dropStep(MinecraftClient client) {
+        if (client.player == null || client.interactionManager == null) return;
+        ScreenHandler h = client.player.playerScreenHandler;
+
+        while (dropIndex <= INV_LAST) {
+            ItemStack stack = h.getSlot(dropIndex).getStack();
+            if (!stack.isEmpty() && !shouldKeep(stack)) break;
+            dropIndex++;
+        }
+
+        if (dropIndex > INV_LAST) {
+            tell(client, "AutoSklep: śmieci wyrzucone, wracam do kopania.");
+            startMining(client);
+            return;
+        }
+
+        // THROW z przyciskiem 1 = wyrzucenie calego stosu (jak Ctrl+Q)
+        client.interactionManager.clickSlot(h.syncId, dropIndex, 1, SlotActionType.THROW, client.player);
+        dropIndex++;
+        waitTicks = 2;
+    }
+
+    private void startMining(MinecraftClient client) {
+        sendChat(client, Config.mineCommand);
+        stage = Stage.MINING;
+        tickCounter = 0;
+    }
+
+    private void sendChat(MinecraftClient client, String message) {
+        if (client.player == null) return;
+        if (message.startsWith("/")) client.player.networkHandler.sendChatCommand(message.substring(1));
+        else client.player.networkHandler.sendChatMessage(message);
+    }
+
+    private void click(MinecraftClient client, int slot, int button, SlotActionType action) {
+        if (client.player == null || client.interactionManager == null) return;
+        ScreenHandler h = client.player.currentScreenHandler;
+        if (slot < 0 || slot >= h.slots.size()) {
+            abort(client, "Slot poza zakresem menu: " + slot);
+            return;
+        }
+        client.interactionManager.clickSlot(h.syncId, slot, button, action, client.player);
+    }
+
+    private void shiftRightClick(MinecraftClient client, int slot) {
+        click(client, slot, 1, SlotActionType.QUICK_MOVE);
+    }
+
+    private void abort(MinecraftClient client, String message) {
+        stage = Stage.IDLE;
+        enabled = false;
+        tell(client, "AutoSklep: " + message + " Otwórz okno (K) i kliknij START.");
+    }
+
+    private void tell(MinecraftClient client, String message) {
+        if (client.player != null) client.player.sendMessage(Text.literal(message), false);
+    }
+}
