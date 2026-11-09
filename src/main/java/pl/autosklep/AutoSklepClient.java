@@ -34,7 +34,7 @@ import java.util.Set;
  * K otwiera okno ustawien.
  * Cykl: #mine (X sekund) -> #stop -> 5 s przerwy -> /sklep sprzedaz -> wyrzucenie smieci -> #mine -> ...
  * Sloty liczone od zera: slot = (rzad - 1) * 9 + (kolumna - 1)
- * Kompas 21, czerwona welna 23, zelazo 14, diament 15, redstone 16.
+ * Kompas 21, czerwona welna 23, zelazo 14, diament 15, redstone 16, lapis 25.
  */
 public class AutoSklepClient implements ClientModInitializer {
     private static final String STOP_COMMAND = "#stop";
@@ -45,6 +45,7 @@ public class AutoSklepClient implements ClientModInitializer {
     private static final int IRON_SLOT = 14;
     private static final int DIAMOND_SLOT = 15;
     private static final int REDSTONE_SLOT = 16;
+    private static final int LAPIS_SLOT = 25;
 
     // Sloty ekwipunku gracza w PlayerScreenHandler: 9-35 plecak, 36-44 pasek
     private static final int INV_FIRST = 9;
@@ -55,6 +56,7 @@ public class AutoSklepClient implements ClientModInitializer {
             "diamond", "diamond_ore", "deepslate_diamond_ore",
             "raw_iron", "iron_ingot", "iron_ore", "deepslate_iron_ore",
             "redstone", "redstone_ore", "deepslate_redstone_ore",
+            "lapis_lazuli", "lapis_ore", "deepslate_lapis_ore",
             "beef", "cooked_beef", "porkchop", "cooked_porkchop",
             "mutton", "cooked_mutton", "chicken", "cooked_chicken",
             "rabbit", "cooked_rabbit"
@@ -70,20 +72,23 @@ public class AutoSklepClient implements ClientModInitializer {
 
     private enum Stage {
         IDLE, MINING, PRE_SHOP, WAIT_FIRST_MENU, WAIT_SECOND_MENU, WAIT_SELL_MENU,
-        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, FINISH, DROP_JUNK
+        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, SELL_LAPIS, FINISH, DROP_JUNK
     }
 
     /** Ustawienia zapisywane w config/autosklep.properties */
     static final class Config {
         static final String OLD_DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:redstone_ore";
-        static final String DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:deepslate_diamond_ore"
+        static final String PREV_DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:deepslate_diamond_ore"
                 + " minecraft:iron_ore minecraft:deepslate_iron_ore"
                 + " minecraft:redstone_ore minecraft:deepslate_redstone_ore";
+        static final String DEFAULT_MINE = "#mine minecraft:deepslate_diamond_ore minecraft:deepslate_iron_ore"
+                + " minecraft:deepslate_redstone_ore minecraft:deepslate_lapis_ore";
         static String mineCommand = DEFAULT_MINE;
         static int mineSeconds = 60;
         static boolean sellIron = true;
         static boolean sellDiamond = true;
         static boolean sellRedstone = true;
+        static boolean sellLapis = true;
         static boolean dropJunk = true;
 
         private static Path file() {
@@ -97,13 +102,14 @@ public class AutoSklepClient implements ClientModInitializer {
                 Properties p = new Properties();
                 p.load(new InputStreamReader(in, StandardCharsets.UTF_8));
                 mineCommand = p.getProperty("mineCommand", mineCommand);
-                if (mineCommand.equals(OLD_DEFAULT_MINE)) mineCommand = DEFAULT_MINE;
+                if (mineCommand.equals(OLD_DEFAULT_MINE) || mineCommand.equals(PREV_DEFAULT_MINE)) mineCommand = DEFAULT_MINE;
                 try {
                     mineSeconds = Math.max(10, Integer.parseInt(p.getProperty("mineSeconds", String.valueOf(mineSeconds))));
                 } catch (NumberFormatException ignored) { }
                 sellIron = Boolean.parseBoolean(p.getProperty("sellIron", "true"));
                 sellDiamond = Boolean.parseBoolean(p.getProperty("sellDiamond", "true"));
                 sellRedstone = Boolean.parseBoolean(p.getProperty("sellRedstone", "true"));
+                sellLapis = Boolean.parseBoolean(p.getProperty("sellLapis", "true"));
                 dropJunk = Boolean.parseBoolean(p.getProperty("dropJunk", "true"));
             } catch (IOException ignored) { }
         }
@@ -115,6 +121,7 @@ public class AutoSklepClient implements ClientModInitializer {
             p.setProperty("sellIron", String.valueOf(sellIron));
             p.setProperty("sellDiamond", String.valueOf(sellDiamond));
             p.setProperty("sellRedstone", String.valueOf(sellRedstone));
+            p.setProperty("sellLapis", String.valueOf(sellLapis));
             p.setProperty("dropJunk", String.valueOf(dropJunk));
             try (OutputStream out = Files.newOutputStream(file())) {
                 p.store(new OutputStreamWriter(out, StandardCharsets.UTF_8), "AutoSklep");
@@ -145,7 +152,7 @@ public class AutoSklepClient implements ClientModInitializer {
         @Override
         protected void init() {
             int cx = width / 2;
-            int top = height / 2 - 110;
+            int top = height / 2 - 125;
 
             commandField = new TextFieldWidget(textRenderer, cx - 150, top + 34, 300, 20, Text.literal("Komenda"));
             commandField.setMaxLength(256);
@@ -160,22 +167,27 @@ public class AutoSklepClient implements ClientModInitializer {
             addDrawableChild(ButtonWidget.builder(toggleLabel("Żelazo", Config.sellIron), b -> {
                 Config.sellIron = !Config.sellIron;
                 b.setMessage(toggleLabel("Żelazo", Config.sellIron));
-            }).dimensions(cx - 150, top + 122, 96, 20).build());
+            }).dimensions(cx - 150, top + 122, 148, 20).build());
 
             addDrawableChild(ButtonWidget.builder(toggleLabel("Diament", Config.sellDiamond), b -> {
                 Config.sellDiamond = !Config.sellDiamond;
                 b.setMessage(toggleLabel("Diament", Config.sellDiamond));
-            }).dimensions(cx - 48, top + 122, 96, 20).build());
+            }).dimensions(cx + 2, top + 122, 148, 20).build());
 
             addDrawableChild(ButtonWidget.builder(toggleLabel("Redstone", Config.sellRedstone), b -> {
                 Config.sellRedstone = !Config.sellRedstone;
                 b.setMessage(toggleLabel("Redstone", Config.sellRedstone));
-            }).dimensions(cx + 54, top + 122, 96, 20).build());
+            }).dimensions(cx - 150, top + 146, 148, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Lapis", Config.sellLapis), b -> {
+                Config.sellLapis = !Config.sellLapis;
+                b.setMessage(toggleLabel("Lapis", Config.sellLapis));
+            }).dimensions(cx + 2, top + 146, 148, 20).build());
 
             addDrawableChild(ButtonWidget.builder(toggleLabel("Wyrzucaj śmieci", Config.dropJunk), b -> {
                 Config.dropJunk = !Config.dropJunk;
                 b.setMessage(toggleLabel("Wyrzucaj śmieci", Config.dropJunk));
-            }).dimensions(cx - 150, top + 148, 300, 20).build());
+            }).dimensions(cx - 150, top + 172, 300, 20).build());
 
             startButton = addDrawableChild(ButtonWidget.builder(startLabel(), b -> {
                 applySettings();
@@ -187,10 +199,10 @@ public class AutoSklepClient implements ClientModInitializer {
                     mod.start(c);
                     close();
                 }
-            }).dimensions(cx - 150, top + 176, 148, 20).build());
+            }).dimensions(cx - 150, top + 200, 148, 20).build());
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Zamknij"), b -> close())
-                    .dimensions(cx + 2, top + 176, 148, 20).build());
+                    .dimensions(cx + 2, top + 200, 148, 20).build());
         }
 
         private void applySettings() {
@@ -216,13 +228,13 @@ public class AutoSklepClient implements ClientModInitializer {
         public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
             super.render(ctx, mouseX, mouseY, delta);
             int cx = width / 2;
-            int top = height / 2 - 110;
+            int top = height / 2 - 125;
             ctx.drawCenteredTextWithShadow(textRenderer, getTitle(), cx, top, 0xFFFFFFFF);
             ctx.drawTextWithShadow(textRenderer, Text.literal("Komenda kopania (Baritone):"), cx - 150, top + 22, 0xFFAAAAAA);
             ctx.drawTextWithShadow(textRenderer, Text.literal("Czas kopania (sekundy):"), cx - 150, top + 66, 0xFFAAAAAA);
             ctx.drawTextWithShadow(textRenderer, Text.literal("Co sprzedawać:"), cx - 150, top + 110, 0xFFAAAAAA);
             String status = mod.enabled ? "DZIAŁA (" + mod.stage + ")" : "WYŁĄCZONY";
-            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, top + 204, 0xFFFFFFFF);
+            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, top + 228, 0xFFFFFFFF);
         }
     }
 
@@ -331,6 +343,13 @@ public class AutoSklepClient implements ClientModInitializer {
             case SELL_REDSTONE -> {
                 if (Config.sellRedstone) {
                     shiftRightClick(client, REDSTONE_SLOT);
+                    waitTicks = 4;
+                }
+                stage = Stage.SELL_LAPIS;
+            }
+            case SELL_LAPIS -> {
+                if (Config.sellLapis) {
+                    shiftRightClick(client, LAPIS_SLOT);
                 }
                 stage = Stage.FINISH;
                 waitTicks = 10;
