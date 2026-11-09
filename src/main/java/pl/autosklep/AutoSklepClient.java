@@ -81,8 +81,12 @@ public class AutoSklepClient implements ClientModInitializer {
         static final String PREV_DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:deepslate_diamond_ore"
                 + " minecraft:iron_ore minecraft:deepslate_iron_ore"
                 + " minecraft:redstone_ore minecraft:deepslate_redstone_ore";
-        static final String DEFAULT_MINE = "#mine minecraft:deepslate_diamond_ore minecraft:deepslate_iron_ore"
+        static final String DEEPSLATE_ONLY_MINE = "#mine minecraft:deepslate_diamond_ore minecraft:deepslate_iron_ore"
                 + " minecraft:deepslate_redstone_ore minecraft:deepslate_lapis_ore";
+        static final String DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:deepslate_diamond_ore"
+                + " minecraft:iron_ore minecraft:deepslate_iron_ore"
+                + " minecraft:redstone_ore minecraft:deepslate_redstone_ore"
+                + " minecraft:lapis_ore minecraft:deepslate_lapis_ore";
         static String mineCommand = DEFAULT_MINE;
         static int mineSeconds = 60;
         static boolean sellIron = true;
@@ -102,7 +106,8 @@ public class AutoSklepClient implements ClientModInitializer {
                 Properties p = new Properties();
                 p.load(new InputStreamReader(in, StandardCharsets.UTF_8));
                 mineCommand = p.getProperty("mineCommand", mineCommand);
-                if (mineCommand.equals(OLD_DEFAULT_MINE) || mineCommand.equals(PREV_DEFAULT_MINE)) mineCommand = DEFAULT_MINE;
+                if (mineCommand.equals(OLD_DEFAULT_MINE) || mineCommand.equals(PREV_DEFAULT_MINE)
+                        || mineCommand.equals(DEEPSLATE_ONLY_MINE)) mineCommand = DEFAULT_MINE;
                 try {
                     mineSeconds = Math.max(10, Integer.parseInt(p.getProperty("mineSeconds", String.valueOf(mineSeconds))));
                 } catch (NumberFormatException ignored) { }
