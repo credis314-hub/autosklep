@@ -37,7 +37,7 @@ import java.util.Set;
  * K otwiera okno ustawien.
  * Cykl: #mine (X sekund) -> #stop -> 5 s przerwy -> /sklep sprzedaz -> wyrzucenie smieci -> #mine -> ...
  * Sloty liczone od zera: slot = (rzad - 1) * 9 + (kolumna - 1)
- * Kompas 21, czerwona welna 23, zelazo 14, diament 15, redstone 16, lapis 25, miedz 12.
+ * Kompas 21, czerwona welna 23, zelazo 14, diament 15, redstone 16, lapis 25, miedz 12, wegiel 11.
  */
 public class AutoSklepClient implements ClientModInitializer {
     private static final String STOP_COMMAND = "#stop";
@@ -50,6 +50,7 @@ public class AutoSklepClient implements ClientModInitializer {
     private static final int REDSTONE_SLOT = 16;
     private static final int LAPIS_SLOT = 25;
     private static final int COPPER_SLOT = 12;
+    private static final int COAL_SLOT = 11;
 
     // Sloty ekwipunku gracza w PlayerScreenHandler: 9-35 plecak, 36-44 pasek
     private static final int INV_FIRST = 9;
@@ -62,6 +63,7 @@ public class AutoSklepClient implements ClientModInitializer {
             "redstone", "redstone_block", "redstone_ore", "deepslate_redstone_ore",
             "lapis_lazuli", "lapis_ore", "deepslate_lapis_ore",
             "raw_copper", "copper_ingot", "copper_ore", "deepslate_copper_ore",
+            "coal", "coal_ore", "deepslate_coal_ore",
             "beef", "cooked_beef", "porkchop", "cooked_porkchop",
             "mutton", "cooked_mutton", "chicken", "cooked_chicken",
             "rabbit", "cooked_rabbit"
@@ -82,7 +84,7 @@ public class AutoSklepClient implements ClientModInitializer {
 
     private enum Stage {
         IDLE, MINING, PRE_SHOP, WAIT_FIRST_MENU, WAIT_SECOND_MENU, WAIT_SELL_MENU,
-        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, SELL_LAPIS, SELL_COPPER, FINISH, DROP_JUNK,
+        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, SELL_LAPIS, SELL_COPPER, SELL_COAL, FINISH, DROP_JUNK,
         MARKET_START, MARKET_WAIT_WB, MARKET_FILL, MARKET_RETURN, MARKET_TAKE, MARKET_CLOSE,
         MARKET_LIST, MARKET_LIST_SEND, MARKET_RESTORE
     }
@@ -107,16 +109,22 @@ public class AutoSklepClient implements ClientModInitializer {
         static boolean sellLapis = true;
         static boolean sellCopper = true;
         static boolean mineCopper = true;
+        static boolean sellCoal = true;
+        static boolean mineCoal = true;
         static boolean dropJunk = true;
         static boolean marketEnabled = false;
         static String marketPrice = "750";
 
         /** Komenda faktycznie wysylana do Baritone (z miedzia, jesli wlaczona i jeszcze jej nie ma). */
         static String effectiveMineCommand() {
+            StringBuilder sb = new StringBuilder(mineCommand);
             if (mineCopper && !mineCommand.contains("copper_ore")) {
-                return mineCommand + " minecraft:copper_ore minecraft:deepslate_copper_ore";
+                sb.append(" minecraft:copper_ore minecraft:deepslate_copper_ore");
             }
-            return mineCommand;
+            if (mineCoal && !mineCommand.contains("coal_ore")) {
+                sb.append(" minecraft:coal_ore minecraft:deepslate_coal_ore");
+            }
+            return sb.toString();
         }
 
         private static Path file() {
@@ -141,6 +149,8 @@ public class AutoSklepClient implements ClientModInitializer {
                 sellLapis = Boolean.parseBoolean(p.getProperty("sellLapis", "true"));
                 sellCopper = Boolean.parseBoolean(p.getProperty("sellCopper", "true"));
                 mineCopper = Boolean.parseBoolean(p.getProperty("mineCopper", "true"));
+                sellCoal = Boolean.parseBoolean(p.getProperty("sellCoal", "true"));
+                mineCoal = Boolean.parseBoolean(p.getProperty("mineCoal", "true"));
                 dropJunk = Boolean.parseBoolean(p.getProperty("dropJunk", "true"));
                 marketEnabled = Boolean.parseBoolean(p.getProperty("marketEnabled", "false"));
                 marketPrice = p.getProperty("marketPrice", "750").trim();
@@ -158,6 +168,8 @@ public class AutoSklepClient implements ClientModInitializer {
             p.setProperty("sellLapis", String.valueOf(sellLapis));
             p.setProperty("sellCopper", String.valueOf(sellCopper));
             p.setProperty("mineCopper", String.valueOf(mineCopper));
+            p.setProperty("sellCoal", String.valueOf(sellCoal));
+            p.setProperty("mineCoal", String.valueOf(mineCoal));
             p.setProperty("dropJunk", String.valueOf(dropJunk));
             p.setProperty("marketEnabled", String.valueOf(marketEnabled));
             p.setProperty("marketPrice", marketPrice);
@@ -191,7 +203,7 @@ public class AutoSklepClient implements ClientModInitializer {
         @Override
         protected void init() {
             int cx = width / 2;
-            int top = height / 2 - 150;
+            int top = height / 2 - 162;
 
             commandField = new TextFieldWidget(textRenderer, cx - 150, top + 34, 300, 20, Text.literal("Komenda"));
             commandField.setMaxLength(256);
@@ -233,12 +245,22 @@ public class AutoSklepClient implements ClientModInitializer {
                 b.setMessage(toggleLabel("Kopanie miedzi", Config.mineCopper));
             }).dimensions(cx + 2, top + 170, 148, 20).build());
 
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Sprzedaż węgla", Config.sellCoal), b -> {
+                Config.sellCoal = !Config.sellCoal;
+                b.setMessage(toggleLabel("Sprzedaż węgla", Config.sellCoal));
+            }).dimensions(cx - 150, top + 194, 148, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Kopanie węgla", Config.mineCoal), b -> {
+                Config.mineCoal = !Config.mineCoal;
+                b.setMessage(toggleLabel("Kopanie węgla", Config.mineCoal));
+            }).dimensions(cx + 2, top + 194, 148, 20).build());
+
             addDrawableChild(ButtonWidget.builder(toggleLabel("Wystawiaj bloki redstone", Config.marketEnabled), b -> {
                 Config.marketEnabled = !Config.marketEnabled;
                 b.setMessage(toggleLabel("Wystawiaj bloki redstone", Config.marketEnabled));
-            }).dimensions(cx - 150, top + 196, 300, 20).build());
+            }).dimensions(cx - 150, top + 220, 300, 20).build());
 
-            priceField = new TextFieldWidget(textRenderer, cx - 60, top + 220, 210, 20, Text.literal("Kwota"));
+            priceField = new TextFieldWidget(textRenderer, cx - 60, top + 244, 210, 20, Text.literal("Kwota"));
             priceField.setMaxLength(12);
             priceField.setText(Config.marketPrice);
             addDrawableChild(priceField);
@@ -246,7 +268,7 @@ public class AutoSklepClient implements ClientModInitializer {
             addDrawableChild(ButtonWidget.builder(toggleLabel("Wyrzucaj śmieci", Config.dropJunk), b -> {
                 Config.dropJunk = !Config.dropJunk;
                 b.setMessage(toggleLabel("Wyrzucaj śmieci", Config.dropJunk));
-            }).dimensions(cx - 150, top + 246, 300, 20).build());
+            }).dimensions(cx - 150, top + 270, 300, 20).build());
 
             startButton = addDrawableChild(ButtonWidget.builder(startLabel(), b -> {
                 applySettings();
@@ -258,10 +280,10 @@ public class AutoSklepClient implements ClientModInitializer {
                     mod.start(c);
                     close();
                 }
-            }).dimensions(cx - 150, top + 274, 148, 20).build());
+            }).dimensions(cx - 150, top + 298, 148, 20).build());
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Zamknij"), b -> close())
-                    .dimensions(cx + 2, top + 274, 148, 20).build());
+                    .dimensions(cx + 2, top + 298, 148, 20).build());
         }
 
         private void applySettings() {
@@ -288,14 +310,14 @@ public class AutoSklepClient implements ClientModInitializer {
         public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
             super.render(ctx, mouseX, mouseY, delta);
             int cx = width / 2;
-            int top = height / 2 - 150;
+            int top = height / 2 - 162;
             ctx.drawCenteredTextWithShadow(textRenderer, getTitle(), cx, top, 0xFFFFFFFF);
             ctx.drawTextWithShadow(textRenderer, Text.literal("Komenda kopania (Baritone):"), cx - 150, top + 22, 0xFFAAAAAA);
             ctx.drawTextWithShadow(textRenderer, Text.literal("Czas kopania (sekundy):"), cx - 150, top + 66, 0xFFAAAAAA);
             ctx.drawTextWithShadow(textRenderer, Text.literal("Co sprzedawać:"), cx - 150, top + 110, 0xFFAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("Kwota /wystaw:"), cx - 150, top + 226, 0xFFAAAAAA);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Kwota /wystaw:"), cx - 150, top + 250, 0xFFAAAAAA);
             String status = mod.enabled ? "DZIAŁA (" + mod.stage + ")" : "WYŁĄCZONY";
-            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, top + 302, 0xFFFFFFFF);
+            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, top + 326, 0xFFFFFFFF);
         }
     }
 
@@ -436,6 +458,13 @@ public class AutoSklepClient implements ClientModInitializer {
             case SELL_COPPER -> {
                 if (Config.sellCopper) {
                     shiftRightClick(client, COPPER_SLOT);
+                    waitTicks = 4;
+                }
+                stage = Stage.SELL_COAL;
+            }
+            case SELL_COAL -> {
+                if (Config.sellCoal) {
+                    shiftRightClick(client, COAL_SLOT);
                 }
                 stage = Stage.FINISH;
                 waitTicks = 10;
