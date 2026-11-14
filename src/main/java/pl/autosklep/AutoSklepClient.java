@@ -15,7 +15,6 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
-import net.minecraft.screen.CraftingScreenHandler;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
@@ -45,12 +44,6 @@ public class AutoSklepClient implements ClientModInitializer {
 
     private static final int COMPASS_SLOT = 21;
     private static final int WOOL_SLOT = 23;
-    private static final int IRON_SLOT = 14;
-    private static final int DIAMOND_SLOT = 15;
-    private static final int REDSTONE_SLOT = 16;
-    private static final int LAPIS_SLOT = 25;
-    private static final int COPPER_SLOT = 12;
-    private static final int COAL_SLOT = 11;
 
     // Sloty ekwipunku gracza w PlayerScreenHandler: 9-35 plecak, 36-44 pasek
     private static final int INV_FIRST = 9;
@@ -64,10 +57,79 @@ public class AutoSklepClient implements ClientModInitializer {
             "lapis_lazuli", "lapis_ore", "deepslate_lapis_ore",
             "raw_copper", "copper_ingot", "copper_ore", "deepslate_copper_ore",
             "coal", "coal_ore", "deepslate_coal_ore",
+            "raw_gold", "gold_ingot", "gold_ore", "deepslate_gold_ore",
+            "dripstone_block", "pointed_dripstone",
             "beef", "cooked_beef", "porkchop", "cooked_porkchop",
             "mutton", "cooked_mutton", "chicken", "cooked_chicken",
             "rabbit", "cooked_rabbit"
     );
+
+    static final int MODE_OFF = 0;
+    static final int MODE_SHOP = 1;
+    static final int MODE_MARKET = 2;
+
+    /** Surowiec: rudy dla Baritone, sprzedaz w sklepie albo wystawianie stosow 64 na rynek. */
+    static final class Res {
+        final String key;
+        final String label;
+        final String[] ores;
+        final Item[] shopItems;
+        final int fallbackSlot;
+        final Item listItem;
+        boolean mine = true;
+        int sellMode = MODE_SHOP;
+        String price;
+
+        Res(String key, String label, String[] ores, Item[] shopItems, int fallbackSlot,
+            Item listItem, String price) {
+            this.key = key;
+            this.label = label;
+            this.ores = ores;
+            this.shopItems = shopItems;
+            this.fallbackSlot = fallbackSlot;
+            this.listItem = listItem;
+            this.price = price;
+        }
+
+        /** sklep -> rynek -> wylaczone -> sklep ... */
+        void cycleMode() {
+            sellMode = (sellMode + 1) % 3;
+        }
+
+        String modeText() {
+            if (sellMode == MODE_SHOP) return "Sklep";
+            if (sellMode == MODE_MARKET) return "Rynek";
+            return "Wył.";
+        }
+    }
+
+    static final Res[] RES = {
+            new Res("iron", "Żelazo",
+                    new String[]{"minecraft:iron_ore", "minecraft:deepslate_iron_ore"},
+                    new Item[]{Items.RAW_IRON}, 14, Items.RAW_IRON, ""),
+            new Res("diamond", "Diament",
+                    new String[]{"minecraft:diamond_ore", "minecraft:deepslate_diamond_ore"},
+                    new Item[]{Items.DIAMOND}, 15, Items.DIAMOND, ""),
+            new Res("redstone", "Redstone",
+                    new String[]{"minecraft:redstone_ore", "minecraft:deepslate_redstone_ore"},
+                    new Item[]{Items.REDSTONE}, 16, Items.REDSTONE, "750"),
+            new Res("lapis", "Lapis",
+                    new String[]{"minecraft:lapis_ore", "minecraft:deepslate_lapis_ore"},
+                    new Item[]{Items.LAPIS_LAZULI}, 25, Items.LAPIS_LAZULI, ""),
+            new Res("copper", "Miedź",
+                    new String[]{"minecraft:copper_ore", "minecraft:deepslate_copper_ore"},
+                    new Item[]{Items.RAW_COPPER}, 12, Items.RAW_COPPER, ""),
+            new Res("coal", "Węgiel",
+                    new String[]{"minecraft:coal_ore", "minecraft:deepslate_coal_ore"},
+                    new Item[]{Items.COAL}, 11, Items.COAL, ""),
+            new Res("gold", "Złoto",
+                    new String[]{"minecraft:gold_ore", "minecraft:deepslate_gold_ore"},
+                    new Item[]{Items.RAW_GOLD}, 13, Items.RAW_GOLD, ""),
+            new Res("dripstone", "Dripstone",
+                    new String[]{"minecraft:dripstone_block", "minecraft:pointed_dripstone"},
+                    new Item[]{Items.DRIPSTONE_BLOCK, Items.POINTED_DRIPSTONE}, -1,
+                    Items.DRIPSTONE_BLOCK, "")
+    };
 
     private KeyBinding openKey;
     private boolean enabled = false;
@@ -75,60 +137,46 @@ public class AutoSklepClient implements ClientModInitializer {
     private int waitTicks = 0;
     private int retries = 0;
     private int dropIndex = INV_FIRST;
-    private int marketSlot = -1;
+    private int sellIndex = 0;
+    private int marketResIndex = -1;
+    private Res marketRes = null;
     private int marketAttempts = 0;
-    private int marketFills = 0;
     private int marketSwapSlot = -1;
     private int marketOrigSel = 0;
     private Stage stage = Stage.IDLE;
 
     private enum Stage {
         IDLE, MINING, PRE_SHOP, WAIT_FIRST_MENU, WAIT_SECOND_MENU, WAIT_SELL_MENU,
-        SELL_IRON, SELL_DIAMOND, SELL_REDSTONE, SELL_LAPIS, SELL_COPPER, SELL_COAL, FINISH, DROP_JUNK,
-        MARKET_START, MARKET_WAIT_WB, MARKET_FILL, MARKET_RETURN, MARKET_TAKE, MARKET_CLOSE,
+        SELL_NEXT, FINISH, DROP_JUNK,
+        MARKET_NEXT,
         MARKET_LIST, MARKET_LIST_SEND, MARKET_RESTORE
     }
 
     /** Ustawienia zapisywane w config/autosklep.properties */
     static final class Config {
-        static final String OLD_DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:redstone_ore";
-        static final String PREV_DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:deepslate_diamond_ore"
-                + " minecraft:iron_ore minecraft:deepslate_iron_ore"
-                + " minecraft:redstone_ore minecraft:deepslate_redstone_ore";
-        static final String DEEPSLATE_ONLY_MINE = "#mine minecraft:deepslate_diamond_ore minecraft:deepslate_iron_ore"
-                + " minecraft:deepslate_redstone_ore minecraft:deepslate_lapis_ore";
-        static final String DEFAULT_MINE = "#mine minecraft:diamond_ore minecraft:deepslate_diamond_ore"
-                + " minecraft:iron_ore minecraft:deepslate_iron_ore"
-                + " minecraft:redstone_ore minecraft:deepslate_redstone_ore"
-                + " minecraft:lapis_ore minecraft:deepslate_lapis_ore";
-        static String mineCommand = DEFAULT_MINE;
+        static String mineExtra = "";
         static int mineSeconds = 60;
-        static boolean sellIron = true;
-        static boolean sellDiamond = true;
-        static boolean sellRedstone = true;
-        static boolean sellLapis = true;
-        static boolean sellCopper = true;
-        static boolean mineCopper = true;
-        static boolean sellCoal = true;
-        static boolean mineCoal = true;
         static boolean dropJunk = true;
-        static boolean marketEnabled = false;
-        static String marketPrice = "750";
 
-        /** Komenda faktycznie wysylana do Baritone (z miedzia, jesli wlaczona i jeszcze jej nie ma). */
+        /** Komenda faktycznie wysylana do Baritone, zlozona z wlaczonych surowcow. */
         static String effectiveMineCommand() {
-            StringBuilder sb = new StringBuilder(mineCommand);
-            if (mineCopper && !mineCommand.contains("copper_ore")) {
-                sb.append(" minecraft:copper_ore minecraft:deepslate_copper_ore");
+            StringBuilder sb = new StringBuilder("#mine");
+            for (Res r : RES) {
+                if (!r.mine) continue;
+                for (String ore : r.ores) sb.append(' ').append(ore);
             }
-            if (mineCoal && !mineCommand.contains("coal_ore")) {
-                sb.append(" minecraft:coal_ore minecraft:deepslate_coal_ore");
-            }
+            if (!mineExtra.isBlank()) sb.append(' ').append(mineExtra.trim());
             return sb.toString();
         }
 
         private static Path file() {
             return FabricLoader.getInstance().getConfigDir().resolve("autosklep.properties");
+        }
+
+        private static boolean flag(Properties p, String key, String oldKey, boolean def) {
+            String v = p.getProperty(key);
+            if (v == null && oldKey != null) v = p.getProperty(oldKey);
+            return v == null ? def : Boolean.parseBoolean(v);
         }
 
         static void load() {
@@ -137,54 +185,57 @@ public class AutoSklepClient implements ClientModInitializer {
             try (InputStream in = Files.newInputStream(f)) {
                 Properties p = new Properties();
                 p.load(new InputStreamReader(in, StandardCharsets.UTF_8));
-                mineCommand = p.getProperty("mineCommand", mineCommand);
-                if (mineCommand.equals(OLD_DEFAULT_MINE) || mineCommand.equals(PREV_DEFAULT_MINE)
-                        || mineCommand.equals(DEEPSLATE_ONLY_MINE)) mineCommand = DEFAULT_MINE;
+                mineExtra = p.getProperty("mineExtra", "").trim();
                 try {
                     mineSeconds = Math.max(10, Integer.parseInt(p.getProperty("mineSeconds", String.valueOf(mineSeconds))));
                 } catch (NumberFormatException ignored) { }
-                sellIron = Boolean.parseBoolean(p.getProperty("sellIron", "true"));
-                sellDiamond = Boolean.parseBoolean(p.getProperty("sellDiamond", "true"));
-                sellRedstone = Boolean.parseBoolean(p.getProperty("sellRedstone", "true"));
-                sellLapis = Boolean.parseBoolean(p.getProperty("sellLapis", "true"));
-                sellCopper = Boolean.parseBoolean(p.getProperty("sellCopper", "true"));
-                mineCopper = Boolean.parseBoolean(p.getProperty("mineCopper", "true"));
-                sellCoal = Boolean.parseBoolean(p.getProperty("sellCoal", "true"));
-                mineCoal = Boolean.parseBoolean(p.getProperty("mineCoal", "true"));
                 dropJunk = Boolean.parseBoolean(p.getProperty("dropJunk", "true"));
-                marketEnabled = Boolean.parseBoolean(p.getProperty("marketEnabled", "false"));
-                marketPrice = p.getProperty("marketPrice", "750").trim();
-                if (marketPrice.isEmpty()) marketPrice = "750";
+                boolean oldMarket = Boolean.parseBoolean(p.getProperty("marketEnabled", "false"));
+                for (Res r : RES) {
+                    String cap = Character.toUpperCase(r.key.charAt(0)) + r.key.substring(1);
+                    r.mine = flag(p, "res." + r.key + ".mine", "mine" + cap, true);
+                    String m = p.getProperty("res." + r.key + ".mode");
+                    if (m != null) {
+                        try {
+                            r.sellMode = Math.max(0, Math.min(2, Integer.parseInt(m.trim())));
+                        } catch (NumberFormatException ignored) { }
+                    } else if (!flag(p, "res." + r.key + ".sell", "sell" + cap, true)) {
+                        r.sellMode = MODE_OFF;
+                    } else if (r.key.equals("redstone") && oldMarket) {
+                        r.sellMode = MODE_MARKET;
+                    }
+                    String pr = p.getProperty("res." + r.key + ".price");
+                    if (pr != null) {
+                        r.price = pr.trim();
+                    } else if (r.key.equals("redstone") && p.getProperty("marketPrice") != null) {
+                        r.price = p.getProperty("marketPrice").trim();
+                    }
+                }
             } catch (IOException ignored) { }
         }
 
         static void save() {
             Properties p = new Properties();
-            p.setProperty("mineCommand", mineCommand);
+            p.setProperty("mineExtra", mineExtra);
             p.setProperty("mineSeconds", String.valueOf(mineSeconds));
-            p.setProperty("sellIron", String.valueOf(sellIron));
-            p.setProperty("sellDiamond", String.valueOf(sellDiamond));
-            p.setProperty("sellRedstone", String.valueOf(sellRedstone));
-            p.setProperty("sellLapis", String.valueOf(sellLapis));
-            p.setProperty("sellCopper", String.valueOf(sellCopper));
-            p.setProperty("mineCopper", String.valueOf(mineCopper));
-            p.setProperty("sellCoal", String.valueOf(sellCoal));
-            p.setProperty("mineCoal", String.valueOf(mineCoal));
             p.setProperty("dropJunk", String.valueOf(dropJunk));
-            p.setProperty("marketEnabled", String.valueOf(marketEnabled));
-            p.setProperty("marketPrice", marketPrice);
+            for (Res r : RES) {
+                p.setProperty("res." + r.key + ".mine", String.valueOf(r.mine));
+                p.setProperty("res." + r.key + ".mode", String.valueOf(r.sellMode));
+                p.setProperty("res." + r.key + ".price", r.price);
+            }
             try (OutputStream out = Files.newOutputStream(file())) {
                 p.store(new OutputStreamWriter(out, StandardCharsets.UTF_8), "AutoSklep");
             } catch (IOException ignored) { }
         }
     }
 
-    /** Okno ustawien otwierane klawiszem K */
+    /** Okno ustawien otwierane klawiszem K: jeden wiersz na surowiec. */
     static final class ConfigScreen extends Screen {
         private final AutoSklepClient mod;
-        private TextFieldWidget commandField;
+        private TextFieldWidget extraField;
         private TextFieldWidget secondsField;
-        private TextFieldWidget priceField;
+        private final TextFieldWidget[] priceFields = new TextFieldWidget[RES.length];
         private ButtonWidget startButton;
 
         ConfigScreen(AutoSklepClient mod) {
@@ -203,73 +254,46 @@ public class AutoSklepClient implements ClientModInitializer {
         @Override
         protected void init() {
             int cx = width / 2;
-            int top = height / 2 - 162;
+            int x0 = cx - 150;
+            int top = height / 2 - 165;
 
-            commandField = new TextFieldWidget(textRenderer, cx - 150, top + 34, 300, 20, Text.literal("Komenda"));
-            commandField.setMaxLength(256);
-            commandField.setText(Config.mineCommand);
-            addDrawableChild(commandField);
-
-            secondsField = new TextFieldWidget(textRenderer, cx - 150, top + 78, 80, 20, Text.literal("Sekundy"));
+            secondsField = new TextFieldWidget(textRenderer, x0 + 130, top + 16, 60, 20, Text.literal("Sekundy"));
             secondsField.setMaxLength(5);
             secondsField.setText(String.valueOf(Config.mineSeconds));
             addDrawableChild(secondsField);
 
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Żelazo", Config.sellIron), b -> {
-                Config.sellIron = !Config.sellIron;
-                b.setMessage(toggleLabel("Żelazo", Config.sellIron));
-            }).dimensions(cx - 150, top + 122, 148, 20).build());
+            extraField = new TextFieldWidget(textRenderer, x0 + 100, top + 40, 200, 20, Text.literal("Dodatkowe rudy"));
+            extraField.setMaxLength(256);
+            extraField.setText(Config.mineExtra);
+            addDrawableChild(extraField);
 
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Diament", Config.sellDiamond), b -> {
-                Config.sellDiamond = !Config.sellDiamond;
-                b.setMessage(toggleLabel("Diament", Config.sellDiamond));
-            }).dimensions(cx + 2, top + 122, 148, 20).build());
+            for (int i = 0; i < RES.length; i++) {
+                final Res r = RES[i];
+                int y = top + 84 + i * 22;
 
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Redstone", Config.sellRedstone), b -> {
-                Config.sellRedstone = !Config.sellRedstone;
-                b.setMessage(toggleLabel("Redstone", Config.sellRedstone));
-            }).dimensions(cx - 150, top + 146, 148, 20).build());
+                addDrawableChild(ButtonWidget.builder(toggleLabel("Kop.", r.mine), b -> {
+                    r.mine = !r.mine;
+                    b.setMessage(toggleLabel("Kop.", r.mine));
+                }).dimensions(x0 + 56, y, 64, 20).build());
 
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Lapis", Config.sellLapis), b -> {
-                Config.sellLapis = !Config.sellLapis;
-                b.setMessage(toggleLabel("Lapis", Config.sellLapis));
-            }).dimensions(cx + 2, top + 146, 148, 20).build());
+                addDrawableChild(ButtonWidget.builder(Text.literal("Sprz.: " + r.modeText()), b -> {
+                    r.cycleMode();
+                    b.setMessage(Text.literal("Sprz.: " + r.modeText()));
+                }).dimensions(x0 + 124, y, 84, 20).build());
 
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Sprzedaż miedzi", Config.sellCopper), b -> {
-                Config.sellCopper = !Config.sellCopper;
-                b.setMessage(toggleLabel("Sprzedaż miedzi", Config.sellCopper));
-            }).dimensions(cx - 150, top + 170, 148, 20).build());
-
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Kopanie miedzi", Config.mineCopper), b -> {
-                Config.mineCopper = !Config.mineCopper;
-                b.setMessage(toggleLabel("Kopanie miedzi", Config.mineCopper));
-            }).dimensions(cx + 2, top + 170, 148, 20).build());
-
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Sprzedaż węgla", Config.sellCoal), b -> {
-                Config.sellCoal = !Config.sellCoal;
-                b.setMessage(toggleLabel("Sprzedaż węgla", Config.sellCoal));
-            }).dimensions(cx - 150, top + 194, 148, 20).build());
-
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Kopanie węgla", Config.mineCoal), b -> {
-                Config.mineCoal = !Config.mineCoal;
-                b.setMessage(toggleLabel("Kopanie węgla", Config.mineCoal));
-            }).dimensions(cx + 2, top + 194, 148, 20).build());
-
-            addDrawableChild(ButtonWidget.builder(toggleLabel("Wystawiaj bloki redstone", Config.marketEnabled), b -> {
-                Config.marketEnabled = !Config.marketEnabled;
-                b.setMessage(toggleLabel("Wystawiaj bloki redstone", Config.marketEnabled));
-            }).dimensions(cx - 150, top + 220, 300, 20).build());
-
-            priceField = new TextFieldWidget(textRenderer, cx - 60, top + 244, 210, 20, Text.literal("Kwota"));
-            priceField.setMaxLength(12);
-            priceField.setText(Config.marketPrice);
-            addDrawableChild(priceField);
+                TextFieldWidget pf = new TextFieldWidget(textRenderer, x0 + 212, y, 88, 20, Text.literal("Cena"));
+                pf.setMaxLength(10);
+                pf.setText(r.price);
+                priceFields[i] = pf;
+                addDrawableChild(pf);
+            }
 
             addDrawableChild(ButtonWidget.builder(toggleLabel("Wyrzucaj śmieci", Config.dropJunk), b -> {
                 Config.dropJunk = !Config.dropJunk;
                 b.setMessage(toggleLabel("Wyrzucaj śmieci", Config.dropJunk));
-            }).dimensions(cx - 150, top + 270, 300, 20).build());
+            }).dimensions(x0, top + 84 + RES.length * 22 + 4, 300, 20).build());
 
+            int yb = top + 84 + RES.length * 22 + 30;
             startButton = addDrawableChild(ButtonWidget.builder(startLabel(), b -> {
                 applySettings();
                 MinecraftClient c = MinecraftClient.getInstance();
@@ -280,19 +304,20 @@ public class AutoSklepClient implements ClientModInitializer {
                     mod.start(c);
                     close();
                 }
-            }).dimensions(cx - 150, top + 298, 148, 20).build());
+            }).dimensions(x0, yb, 148, 20).build());
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Zamknij"), b -> close())
-                    .dimensions(cx + 2, top + 298, 148, 20).build());
+                    .dimensions(x0 + 152, yb, 148, 20).build());
         }
 
         private void applySettings() {
-            String cmd = commandField.getText().trim();
-            if (!cmd.isEmpty()) Config.mineCommand = cmd;
+            Config.mineExtra = extraField.getText().trim();
             try {
                 Config.mineSeconds = Math.max(10, Integer.parseInt(secondsField.getText().trim()));
             } catch (NumberFormatException ignored) { }
-            Config.marketPrice = priceField.getText().trim();
+            for (int i = 0; i < RES.length; i++) {
+                RES[i].price = priceFields[i].getText().trim();
+            }
             Config.save();
         }
 
@@ -310,14 +335,22 @@ public class AutoSklepClient implements ClientModInitializer {
         public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
             super.render(ctx, mouseX, mouseY, delta);
             int cx = width / 2;
-            int top = height / 2 - 162;
+            int x0 = cx - 150;
+            int top = height / 2 - 165;
+            int gray = 0xFFAAAAAA;
             ctx.drawCenteredTextWithShadow(textRenderer, getTitle(), cx, top, 0xFFFFFFFF);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("Komenda kopania (Baritone):"), cx - 150, top + 22, 0xFFAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("Czas kopania (sekundy):"), cx - 150, top + 66, 0xFFAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("Co sprzedawać:"), cx - 150, top + 110, 0xFFAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("Kwota /wystaw:"), cx - 150, top + 250, 0xFFAAAAAA);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Czas kopania (s):"), x0, top + 22, gray);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Dodatkowe rudy:"), x0, top + 46, gray);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Surowiec"), x0, top + 72, gray);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Kopanie"), x0 + 60, top + 72, gray);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("Sprzedaż"), x0 + 128, top + 72, gray);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("/wystaw 64 ..."), x0 + 214, top + 72, gray);
+            for (int i = 0; i < RES.length; i++) {
+                ctx.drawTextWithShadow(textRenderer, Text.literal(RES[i].label), x0, top + 84 + i * 22 + 6, 0xFFFFFFFF);
+            }
             String status = mod.enabled ? "DZIAŁA (" + mod.stage + ")" : "WYŁĄCZONY";
-            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, top + 326, 0xFFFFFFFF);
+            int ys = top + 84 + RES.length * 22 + 56;
+            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, ys, 0xFFFFFFFF);
         }
     }
 
@@ -387,14 +420,7 @@ public class AutoSklepClient implements ClientModInitializer {
             return;
         }
 
-        if (stage == Stage.MARKET_START) { marketStart(client); return; }
-        if (stage == Stage.MARKET_CLOSE) {
-            client.player.closeHandledScreen();
-            marketAttempts = 0;
-            stage = Stage.MARKET_LIST;
-            waitTicks = 10;
-            return;
-        }
+        if (stage == Stage.MARKET_NEXT) { marketNext(client); return; }
         if (stage == Stage.MARKET_LIST) { marketList(client); return; }
         if (stage == Stage.MARKET_LIST_SEND) { marketListSend(client); return; }
         if (stage == Stage.MARKET_RESTORE) { marketRestore(client); return; }
@@ -402,9 +428,6 @@ public class AutoSklepClient implements ClientModInitializer {
         if (client.currentScreen == null || client.player.currentScreenHandler == client.player.playerScreenHandler) {
             if (stage == Stage.WAIT_FIRST_MENU) {
                 if (++retries > 30) abort(client, "Menu /sklep nie otworzyło się. Automat zatrzymany.");
-                else waitTicks = 10;
-            } else if (stage == Stage.MARKET_WAIT_WB) {
-                if (++retries > 30) abort(client, "Stół po /wb nie otworzył się. Automat zatrzymany.");
                 else waitTicks = 10;
             } else {
                 abort(client, "Nie znaleziono oczekiwanego menu. Automat zatrzymany.");
@@ -424,82 +447,62 @@ public class AutoSklepClient implements ClientModInitializer {
                 waitTicks = 12;
             }
             case WAIT_SELL_MENU -> {
-                stage = Stage.SELL_IRON;
+                stage = Stage.SELL_NEXT;
+                sellIndex = 0;
                 waitTicks = 4;
             }
-            case SELL_IRON -> {
-                if (Config.sellIron) {
-                    shiftRightClick(client, IRON_SLOT);
+            case SELL_NEXT -> {
+                while (sellIndex < RES.length && !wantsSell(RES[sellIndex])) sellIndex++;
+                if (sellIndex >= RES.length) {
+                    stage = Stage.FINISH;
+                    waitTicks = 10;
+                } else {
+                    sellResource(client, RES[sellIndex]);
+                    sellIndex++;
                     waitTicks = 4;
                 }
-                stage = Stage.SELL_DIAMOND;
-            }
-            case SELL_DIAMOND -> {
-                if (Config.sellDiamond) {
-                    shiftRightClick(client, DIAMOND_SLOT);
-                    waitTicks = 4;
-                }
-                stage = Stage.SELL_REDSTONE;
-            }
-            case SELL_REDSTONE -> {
-                if (Config.sellRedstone && !Config.marketEnabled) {
-                    shiftRightClick(client, REDSTONE_SLOT);
-                    waitTicks = 4;
-                }
-                stage = Stage.SELL_LAPIS;
-            }
-            case SELL_LAPIS -> {
-                if (Config.sellLapis) {
-                    shiftRightClick(client, LAPIS_SLOT);
-                    waitTicks = 4;
-                }
-                stage = Stage.SELL_COPPER;
-            }
-            case SELL_COPPER -> {
-                if (Config.sellCopper) {
-                    shiftRightClick(client, COPPER_SLOT);
-                    waitTicks = 4;
-                }
-                stage = Stage.SELL_COAL;
-            }
-            case SELL_COAL -> {
-                if (Config.sellCoal) {
-                    shiftRightClick(client, COAL_SLOT);
-                }
-                stage = Stage.FINISH;
-                waitTicks = 10;
             }
             case FINISH -> {
                 client.player.closeHandledScreen();
                 tell(client, "AutoSklep: sprzedaż zakończona.");
-                if (Config.marketEnabled) {
-                    stage = Stage.MARKET_START;
+                if (anyMarket()) {
+                    marketResIndex = -1;
+                    stage = Stage.MARKET_NEXT;
                     waitTicks = 10;
                 } else {
                     afterSale(client);
                 }
             }
-            case MARKET_WAIT_WB -> {
-                if (!(client.player.currentScreenHandler instanceof CraftingScreenHandler)) {
-                    abort(client, "Po /wb nie otworzył się stół rzemieślniczy. Automat zatrzymany.");
-                } else {
-                    stage = Stage.MARKET_FILL;
-                    waitTicks = 4;
-                }
-            }
-            case MARKET_FILL -> marketFill(client);
-            case MARKET_RETURN -> {
-                // oddaj reszte z kursora na dawne miejsce, zanim wezmiemy wynik
-                if (marketSlot >= 0) click(client, marketSlot, 0, SlotActionType.PICKUP);
-                stage = Stage.MARKET_TAKE;
-                waitTicks = 4;
-            }
-            case MARKET_TAKE -> {
-                click(client, 0, 0, SlotActionType.QUICK_MOVE);
-                stage = Stage.MARKET_FILL;
-                waitTicks = 6;
-            }
             default -> { }
+        }
+    }
+
+    /** Redstone nie idzie do sklepu, gdy jest skladana na bloki dla rynku. */
+    private static boolean wantsSell(Res r) {
+        return r.sellMode == MODE_SHOP;
+    }
+
+    /** Szuka w menu sklepu (bez ekwipunku gracza) slotu z danym przedmiotem. */
+    private static int findShopSlot(ScreenHandler h, Item item) {
+        int container = h.slots.size() - 36;
+        for (int i = 0; i < container; i++) {
+            if (h.getSlot(i).getStack().isOf(item)) return i;
+        }
+        return -1;
+    }
+
+    private void sellResource(MinecraftClient client, Res r) {
+        ScreenHandler h = client.player.currentScreenHandler;
+        boolean any = false;
+        for (Item it : r.shopItems) {
+            int slot = findShopSlot(h, it);
+            if (slot >= 0) {
+                shiftRightClick(client, slot);
+                any = true;
+            }
+        }
+        if (!any && r.fallbackSlot >= 0) {
+            shiftRightClick(client, r.fallbackSlot);
         }
     }
 
@@ -517,8 +520,15 @@ public class AutoSklepClient implements ClientModInitializer {
         }
     }
 
-    private static boolean priceOk() {
-        return Config.marketPrice.matches("[0-9]+(\\.[0-9]+)?");
+    private static boolean priceOk(String price) {
+        return price != null && price.matches("[0-9]+(\\.[0-9]+)?");
+    }
+
+    private static boolean anyMarket() {
+        for (Res r : RES) {
+            if (r.sellMode == MODE_MARKET) return true;
+        }
+        return false;
     }
 
     private static int countItem(MinecraftClient client, Item item) {
@@ -530,75 +540,49 @@ public class AutoSklepClient implements ClientModInitializer {
         return n;
     }
 
-    private void marketStart(MinecraftClient client) {
-        if (!priceOk()) {
-            tell(client, "AutoSklep: ustaw kwotę rynku w oknie (K) – pomijam wystawianie.");
+    /** Przechodzi do nastepnego surowca w trybie Rynek. */
+    private void marketNext(MinecraftClient client) {
+        marketResIndex++;
+        while (marketResIndex < RES.length && RES[marketResIndex].sellMode != MODE_MARKET) marketResIndex++;
+        if (marketResIndex >= RES.length) {
             afterSale(client);
             return;
         }
-        marketFills = 0;
+        marketRes = RES[marketResIndex];
+        if (!priceOk(marketRes.price)) {
+            tell(client, "AutoSklep: ustaw cenę dla: " + marketRes.label + " (okno K) – pomijam rynek.");
+            stage = Stage.MARKET_NEXT;
+            waitTicks = 2;
+            return;
+        }
         marketAttempts = 0;
-        if (countItem(client, Items.REDSTONE) < 9) {
-            // nie ma z czego skladac, ale moga lezec gotowe bloki do wystawienia
-            stage = Stage.MARKET_LIST;
-            waitTicks = 4;
-            return;
-        }
-        tell(client, "AutoSklep: wpisuję /wb");
-        client.player.networkHandler.sendChatCommand("wb");
-        stage = Stage.MARKET_WAIT_WB;
-        retries = 0;
-        waitTicks = 20;
-    }
-
-    /** Jeden obieg skladania: stos redstone na kursor, rozlozenie rowno na siatke 3x3. */
-    private void marketFill(MinecraftClient client) {
-        if (client.player == null || client.interactionManager == null) return;
-        ScreenHandler h = client.player.currentScreenHandler;
-        int found = -1;
-        for (int i = 10; i < h.slots.size(); i++) {
-            ItemStack st = h.getSlot(i).getStack();
-            if (st.isOf(Items.REDSTONE) && st.getCount() >= 9) { found = i; break; }
-        }
-        if (found < 0 || ++marketFills > 12) {
-            stage = Stage.MARKET_CLOSE;
-            waitTicks = 4;
-            return;
-        }
-        marketSlot = found;
-        int id = h.syncId;
-        var im = client.interactionManager;
-        im.clickSlot(id, found, 0, SlotActionType.PICKUP, client.player);
-        im.clickSlot(id, -999, 0, SlotActionType.QUICK_CRAFT, client.player);
-        for (int g = 1; g <= 9; g++) {
-            im.clickSlot(id, g, 1, SlotActionType.QUICK_CRAFT, client.player);
-        }
-        im.clickSlot(id, -999, 2, SlotActionType.QUICK_CRAFT, client.player);
-        stage = Stage.MARKET_RETURN;
+        stage = Stage.MARKET_LIST;
         waitTicks = 4;
     }
 
-    /** Wybiera pelny stos 64 blokow redstone do reki (bez ruszania paska, jesli juz tam jest). */
+    /** Wybiera pelny stos 64 sztuk biezacego surowca do reki (bez ruszania paska, jesli juz tam jest). */
     private void marketList(MinecraftClient client) {
         if (client.player == null || client.interactionManager == null) return;
         if (marketAttempts >= 8) {
-            tell(client, "AutoSklep: za dużo prób wystawienia, kończę.");
-            afterSale(client);
+            tell(client, "AutoSklep: za dużo prób wystawienia (" + marketRes.label + "), idę dalej.");
+            stage = Stage.MARKET_NEXT;
+            waitTicks = 2;
             return;
         }
         var inv = client.player.getInventory();
         int found = -1;
         for (int i = 0; i < 36; i++) {
             ItemStack st = inv.getStack(i);
-            // wystawiamy dopiero pelny stos 64 blokow
-            if (st.isOf(Items.REDSTONE_BLOCK) && st.getCount() >= 64) { found = i; break; }
+            // wystawiamy dopiero pelny stos 64 sztuk
+            if (st.isOf(marketRes.listItem) && st.getCount() >= 64) { found = i; break; }
         }
         if (found < 0) {
             if (marketAttempts == 0) {
-                tell(client, "AutoSklep: bloki redstone: " + countItem(client, Items.REDSTONE_BLOCK)
+                tell(client, "AutoSklep: " + marketRes.label + ": " + countItem(client, marketRes.listItem)
                         + "/64 – czekam na pełny stos.");
             }
-            afterSale(client);
+            stage = Stage.MARKET_NEXT;
+            waitTicks = 2;
             return;
         }
         marketOrigSel = inv.selectedSlot;
@@ -617,8 +601,8 @@ public class AutoSklepClient implements ClientModInitializer {
     private void marketListSend(MinecraftClient client) {
         marketAttempts++;
         ItemStack hand = client.player.getMainHandStack();
-        if (hand.isOf(Items.REDSTONE_BLOCK)) {
-            String cmd = "wystaw " + hand.getCount() + " " + Config.marketPrice;
+        if (hand.isOf(marketRes.listItem)) {
+            String cmd = "wystaw " + hand.getCount() + " " + marketRes.price;
             tell(client, "AutoSklep: /" + cmd);
             client.player.networkHandler.sendChatCommand(cmd);
             waitTicks = 30;
@@ -669,7 +653,12 @@ public class AutoSklepClient implements ClientModInitializer {
     }
 
     private void startMining(MinecraftClient client) {
-        sendChat(client, Config.effectiveMineCommand());
+        String cmd = Config.effectiveMineCommand();
+        if (cmd.equals("#mine")) {
+            abort(client, "Nie wybrano żadnej rudy do kopania.");
+            return;
+        }
+        sendChat(client, cmd);
         stage = Stage.MINING;
         tickCounter = 0;
     }
