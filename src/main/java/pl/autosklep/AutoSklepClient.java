@@ -2,6 +2,7 @@ package pl.autosklep;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
@@ -28,6 +29,7 @@ import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
 
@@ -58,6 +60,7 @@ public class AutoSklepClient implements ClientModInitializer {
             "raw_copper", "copper_ingot", "copper_ore", "deepslate_copper_ore",
             "coal", "coal_ore", "deepslate_coal_ore",
             "raw_gold", "gold_ingot", "gold_ore", "deepslate_gold_ore",
+            "emerald", "emerald_ore", "deepslate_emerald_ore",
             "dripstone_block", "pointed_dripstone",
             "beef", "cooked_beef", "porkchop", "cooked_porkchop",
             "mutton", "cooked_mutton", "chicken", "cooked_chicken",
@@ -125,6 +128,9 @@ public class AutoSklepClient implements ClientModInitializer {
             new Res("gold", "Złoto",
                     new String[]{"minecraft:gold_ore", "minecraft:deepslate_gold_ore"},
                     new Item[]{Items.RAW_GOLD}, 13, Items.RAW_GOLD, ""),
+            new Res("emerald", "Szmaragd",
+                    new String[]{"minecraft:emerald_ore", "minecraft:deepslate_emerald_ore"},
+                    new Item[]{Items.EMERALD}, -1, Items.EMERALD, ""),
             new Res("dripstone", "Dripstone",
                     new String[]{"minecraft:dripstone_block", "minecraft:pointed_dripstone"},
                     new Item[]{Items.DRIPSTONE_BLOCK, Items.POINTED_DRIPSTONE}, -1,
@@ -139,6 +145,9 @@ public class AutoSklepClient implements ClientModInitializer {
     private int dropIndex = INV_FIRST;
     private int sellIndex = 0;
     private int marketResIndex = -1;
+    private volatile boolean marketFullSeen = false;
+    private long marketBlockedUntil = 0;
+    private static final long MARKET_BLOCK_MS = 10 * 60 * 1000L;
     private Res marketRes = null;
     private int marketAttempts = 0;
     private int marketSwapSlot = -1;
@@ -157,6 +166,7 @@ public class AutoSklepClient implements ClientModInitializer {
         static String mineExtra = "";
         static int mineSeconds = 60;
         static boolean dropJunk = true;
+        static boolean marketFallbackShop = true;
 
         /** Komenda faktycznie wysylana do Baritone, zlozona z wlaczonych surowcow. */
         static String effectiveMineCommand() {
@@ -190,6 +200,7 @@ public class AutoSklepClient implements ClientModInitializer {
                     mineSeconds = Math.max(10, Integer.parseInt(p.getProperty("mineSeconds", String.valueOf(mineSeconds))));
                 } catch (NumberFormatException ignored) { }
                 dropJunk = Boolean.parseBoolean(p.getProperty("dropJunk", "true"));
+                marketFallbackShop = Boolean.parseBoolean(p.getProperty("marketFallbackShop", "true"));
                 boolean oldMarket = Boolean.parseBoolean(p.getProperty("marketEnabled", "false"));
                 for (Res r : RES) {
                     String cap = Character.toUpperCase(r.key.charAt(0)) + r.key.substring(1);
@@ -219,6 +230,7 @@ public class AutoSklepClient implements ClientModInitializer {
             p.setProperty("mineExtra", mineExtra);
             p.setProperty("mineSeconds", String.valueOf(mineSeconds));
             p.setProperty("dropJunk", String.valueOf(dropJunk));
+            p.setProperty("marketFallbackShop", String.valueOf(marketFallbackShop));
             for (Res r : RES) {
                 p.setProperty("res." + r.key + ".mine", String.valueOf(r.mine));
                 p.setProperty("res." + r.key + ".mode", String.valueOf(r.sellMode));
@@ -251,11 +263,15 @@ public class AutoSklepClient implements ClientModInitializer {
             return Text.literal(mod.enabled ? "STOP" : "START");
         }
 
+        private int topY() {
+            return height / 2 - (RES.length * 22 + 184) / 2;
+        }
+
         @Override
         protected void init() {
             int cx = width / 2;
             int x0 = cx - 150;
-            int top = height / 2 - 165;
+            int top = topY();
 
             secondsField = new TextFieldWidget(textRenderer, x0 + 130, top + 16, 60, 20, Text.literal("Sekundy"));
             secondsField.setMaxLength(5);
@@ -293,7 +309,12 @@ public class AutoSklepClient implements ClientModInitializer {
                 b.setMessage(toggleLabel("Wyrzucaj śmieci", Config.dropJunk));
             }).dimensions(x0, top + 84 + RES.length * 22 + 4, 300, 20).build());
 
-            int yb = top + 84 + RES.length * 22 + 30;
+            addDrawableChild(ButtonWidget.builder(toggleLabel("Rynek pełny → sprzedaj w sklepie", Config.marketFallbackShop), b -> {
+                Config.marketFallbackShop = !Config.marketFallbackShop;
+                b.setMessage(toggleLabel("Rynek pełny → sprzedaj w sklepie", Config.marketFallbackShop));
+            }).dimensions(x0, top + 84 + RES.length * 22 + 28, 300, 20).build());
+
+            int yb = top + 84 + RES.length * 22 + 54;
             startButton = addDrawableChild(ButtonWidget.builder(startLabel(), b -> {
                 applySettings();
                 MinecraftClient c = MinecraftClient.getInstance();
@@ -336,7 +357,7 @@ public class AutoSklepClient implements ClientModInitializer {
             super.render(ctx, mouseX, mouseY, delta);
             int cx = width / 2;
             int x0 = cx - 150;
-            int top = height / 2 - 165;
+            int top = topY();
             int gray = 0xFFAAAAAA;
             ctx.drawCenteredTextWithShadow(textRenderer, getTitle(), cx, top, 0xFFFFFFFF);
             ctx.drawTextWithShadow(textRenderer, Text.literal("Czas kopania (s):"), x0, top + 22, gray);
@@ -349,7 +370,7 @@ public class AutoSklepClient implements ClientModInitializer {
                 ctx.drawTextWithShadow(textRenderer, Text.literal(RES[i].label), x0, top + 84 + i * 22 + 6, 0xFFFFFFFF);
             }
             String status = mod.enabled ? "DZIAŁA (" + mod.stage + ")" : "WYŁĄCZONY";
-            int ys = top + 84 + RES.length * 22 + 56;
+            int ys = top + 84 + RES.length * 22 + 80;
             ctx.drawCenteredTextWithShadow(textRenderer, Text.literal("Status: " + status), cx, ys, 0xFFFFFFFF);
         }
     }
@@ -366,6 +387,19 @@ public class AutoSklepClient implements ClientModInitializer {
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> tick(client));
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> onGameMessage(message));
+    }
+
+    /** Wykrywa komunikat serwera o pelnym rynku ("osiagnales maksymalna liczbe przedmiotow na rynku"). */
+    private void onGameMessage(Text message) {
+        String t = message.getString().toLowerCase(Locale.ROOT);
+        if (t.contains("maksymaln") && t.contains("rynku")) {
+            marketFullSeen = true;
+        }
+    }
+
+    private boolean marketBlocked() {
+        return System.currentTimeMillis() < marketBlockedUntil;
     }
 
     private void start(MinecraftClient client) {
@@ -465,7 +499,7 @@ public class AutoSklepClient implements ClientModInitializer {
             case FINISH -> {
                 client.player.closeHandledScreen();
                 tell(client, "AutoSklep: sprzedaż zakończona.");
-                if (anyMarket()) {
+                if (anyMarket() && !marketBlocked()) {
                     marketResIndex = -1;
                     stage = Stage.MARKET_NEXT;
                     waitTicks = 10;
@@ -478,8 +512,10 @@ public class AutoSklepClient implements ClientModInitializer {
     }
 
     /** Redstone nie idzie do sklepu, gdy jest skladana na bloki dla rynku. */
-    private static boolean wantsSell(Res r) {
-        return r.sellMode == MODE_SHOP;
+    private boolean wantsSell(Res r) {
+        if (r.sellMode == MODE_SHOP) return true;
+        // rynek pelny: nadwyzki ida do sklepu, zeby nie zapchac ekwipunku
+        return r.sellMode == MODE_MARKET && Config.marketFallbackShop && marketBlocked();
     }
 
     /** Szuka w menu sklepu (bez ekwipunku gracza) slotu z danym przedmiotem. */
@@ -600,6 +636,7 @@ public class AutoSklepClient implements ClientModInitializer {
 
     private void marketListSend(MinecraftClient client) {
         marketAttempts++;
+        marketFullSeen = false;
         ItemStack hand = client.player.getMainHandStack();
         if (hand.isOf(marketRes.listItem)) {
             String cmd = "wystaw " + hand.getCount() + " " + marketRes.price;
@@ -621,6 +658,14 @@ public class AutoSklepClient implements ClientModInitializer {
         }
         client.player.getInventory().selectedSlot = marketOrigSel;
         marketSwapSlot = -1;
+        if (marketFullSeen) {
+            marketFullSeen = false;
+            marketBlockedUntil = System.currentTimeMillis() + MARKET_BLOCK_MS;
+            tell(client, "AutoSklep: rynek pełny (limit slotów) – nie wystawiam przez 10 min"
+                    + (Config.marketFallbackShop ? ", nadwyżki pójdą do sklepu." : "."));
+            afterSale(client);
+            return;
+        }
         stage = Stage.MARKET_LIST;
         waitTicks = 6;
     }
